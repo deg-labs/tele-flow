@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    volumes:
+      # 開発中のため現在のディレクトリをコンテナ内の /app にマウントする
+      # Telethon によって作成される .session ファイルとSQLite DB永続化
+      - .:/app
+    # 初回実行時にTelethon(telegram)電話番号やログインコードを入力するため標準入力とttyを有効化  
+    stdin_open: true
+    tty: true
