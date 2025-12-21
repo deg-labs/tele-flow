@@ -124,7 +124,7 @@ def _parse_amount(amount_str):
 
 def parse_liquidation_message(message_text):
     if not message_text: return None, None, None
-    match = re.search(r"#(\w+)\s+(Long|Short)\s+Liquidation:\s*(\$[\d,]+\.?\d*[kM]?)", message_text, re.IGNORECASE)
+    match = re.search(r"#(?:\w+:)?(\w+)\s+(Long|Short)\s+Liquidation:\s*(\$[\d,]+\.?\d*[kM]?)", message_text, re.IGNORECASE)
     if match:
         ticker, direction, amount_str = match.groups()
         return ticker.upper(), direction.capitalize(), _parse_amount(amount_str)
