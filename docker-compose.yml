@@ -14,3 +14,5 @@ services:
     # 初回実行時にTelethon(telegram)電話番号やログインコードを入力するため標準入力とttyを有効化  
     stdin_open: true
     tty: true
+    restart: always
+
