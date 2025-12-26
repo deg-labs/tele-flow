@@ -31,6 +31,7 @@ try:
     BIAS_THRESHOLD = float(os.getenv('BIAS_THRESHOLD', 0.85))
     SUMMARY_COOLDOWN_SECONDS = int(os.getenv('SUMMARY_COOLDOWN_SECONDS', 60))
     ACTIVE_IDLE_TRANSITION_GRACE_PERIOD_SECONDS = int(os.getenv('ACTIVE_IDLE_TRANSITION_GRACE_PERIOD_SECONDS', 30))
+    SINGLE_EVENT_NOTIFICATION_THRESHOLD = float(os.getenv('SINGLE_EVENT_NOTIFICATION_THRESHOLD', 0))
 except (ValueError, TypeError) as e:
     logging.error(f"Invalid configuration value: {e}. Please check your .env file.")
     exit(1)
@@ -169,6 +170,24 @@ class LiquidationMonitor:
         self.last_above_threshold_time = None # REFACTOR: Renamed for clarity
         self.active_period_events = []
 
+    async def _send_single_event_notification(self, event):
+        if not DISCORD_WEBHOOK_URL: return
+        direction_emoji = "🟢" if event["direction"] == "Short" else "🔴"
+        title = f"{direction_emoji} Large {event['direction']} Liquidation"
+        description_lines = [
+            f"**Ticker:** `{event['ticker']}`",
+            f"**Amount:** `${event['amount']:,.2f}`",
+            f"**Time:** `{event['timestamp'].isoformat()}`",
+        ]
+        embed = {"title": title, "description": "\n".join(description_lines), "color": 5763719 if event["direction"] == "Short" else 15548997}
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed]}) as response:
+                    response.raise_for_status()
+                    logging.info("Successfully sent single-event notification to Discord.")
+            except aiohttp.ClientError as e:
+                logging.error(f"Failed to send Discord single-event notification: {e}")
+
     async def _send_summary_notification(self, metrics, acceleration, prev_speed):
         if not DISCORD_WEBHOOK_URL: return
         title = "⚠ High Liquidation Activity ⚠"
@@ -273,6 +292,10 @@ async def process_message(conn: sqlite3.Connection, message, monitor: Liquidatio
             new_event = {"timestamp": now, "ticker": ticker, "direction": direction, "amount": amount}
             monitor.active_period_events.append(new_event)
             logging.info(f"Appended event to active session. Total events: {len(monitor.active_period_events)}")
+
+        if SINGLE_EVENT_NOTIFICATION_THRESHOLD > 0 and amount >= SINGLE_EVENT_NOTIFICATION_THRESHOLD:
+            single_event = {"timestamp": now, "ticker": ticker, "direction": direction, "amount": amount}
+            await monitor._send_single_event_notification(single_event)
         
     except Exception as e:
         logging.error(f"Error processing message (ID: {message.id}): {e}", exc_info=True)
@@ -335,4 +358,3 @@ if __name__ == "__main__":
         logging.info("Shutting down gracefully.")
     except Exception as e:
         logging.error(f"An unexpected error occurred in main execution: {e}", exc_info=True)
-
