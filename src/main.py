@@ -20,6 +20,7 @@ API_HASH = os.getenv('API_HASH')
 SESSION_NAME = os.getenv('SESSION_NAME', 'my_session')
 CHANNEL_USERNAME = os.getenv('CHANNEL_USERNAME')
 DISCORD_WEBHOOK_URL = os.getenv('DISCORD_WEBHOOK_URL')
+JST_TZ = timezone(timedelta(hours=9))
 
 try:
     MESSAGE_HISTORY_LIMIT = int(os.getenv('MESSAGE_HISTORY_LIMIT', 50))
@@ -174,10 +175,11 @@ class LiquidationMonitor:
         if not DISCORD_WEBHOOK_URL: return
         direction_emoji = "🟢" if event["direction"] == "Short" else "🔴"
         title = f"{direction_emoji} Large {event['direction']} Liquidation"
+        jst_time = event["timestamp"].astimezone(JST_TZ).strftime("%Y-%m-%d %H:%M:%S JST")
         description_lines = [
             f"**Ticker:** `{event['ticker']}`",
             f"**Amount:** `${event['amount']:,.2f}`",
-            f"**Time:** `{event['timestamp'].isoformat()}`",
+            f"**Time:** `{jst_time}`",
         ]
         embed = {"title": title, "description": "\n".join(description_lines), "color": 5763719 if event["direction"] == "Short" else 15548997}
         async with aiohttp.ClientSession() as session:
@@ -194,11 +196,13 @@ class LiquidationMonitor:
         if acceleration >= ACCELERATION_THRESHOLD and metrics["speed_usd_per_sec"] >= BASE_THRESHOLD_USD_PER_SEC:
             title = "🚨 CRITICAL LIQUIDATION SPIKE 🚨"
 
+        now_jst = datetime.now(timezone.utc).astimezone(JST_TZ).strftime("%Y-%m-%d %H:%M:%S JST")
         description_lines = [
             f"**Speed:** `{metrics['speed_usd_per_sec']:.2f} USD/sec`",
             f"**Acceleration:** `x{acceleration:.2f}` (Prev Window: {prev_speed:.2f} USD/sec)",
             f"**Count:** `{metrics['total_count']} events`",
             f"**Total Amount:** `${metrics['total_amount']:,.2f}`",
+            f"**Time:** `{now_jst}`",
         ]
         if metrics['total_count'] > 0:
             description_lines.append(f"**Avg per event:** `${metrics['avg_event_amount']:,.2f}`")
