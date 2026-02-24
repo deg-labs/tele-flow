@@ -9,6 +9,7 @@ from collections import defaultdict
 
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
+from telethon.errors import AuthKeyUnregisteredError, RPCError, SessionPasswordNeededError
 
 # --- Setup Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -33,6 +34,8 @@ try:
     SUMMARY_COOLDOWN_SECONDS = int(os.getenv('SUMMARY_COOLDOWN_SECONDS', 60))
     ACTIVE_IDLE_TRANSITION_GRACE_PERIOD_SECONDS = int(os.getenv('ACTIVE_IDLE_TRANSITION_GRACE_PERIOD_SECONDS', 30))
     SINGLE_EVENT_NOTIFICATION_THRESHOLD = float(os.getenv('SINGLE_EVENT_NOTIFICATION_THRESHOLD', 0))
+    RECONNECT_BASE_DELAY_SECONDS = int(os.getenv('RECONNECT_BASE_DELAY_SECONDS', 5))
+    RECONNECT_MAX_DELAY_SECONDS = int(os.getenv('RECONNECT_MAX_DELAY_SECONDS', 300))
 except (ValueError, TypeError) as e:
     logging.error(f"Invalid configuration value: {e}. Please check your .env file.")
     exit(1)
@@ -58,6 +61,12 @@ def init_db(conn: sqlite3.Connection):
         conn.execute("""
             CREATE TABLE IF NOT EXISTS notification_cooldowns (
                 key TEXT PRIMARY KEY,
+                notified_at TIMESTAMP NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS single_event_notifications (
+                message_id INTEGER PRIMARY KEY,
                 notified_at TIMESTAMP NOT NULL
             )
         """)
@@ -107,6 +116,21 @@ def get_liquidations_in_timeframe(conn: sqlite3.Connection, start_time, end_time
         if ts:
             results.append({"timestamp": ts, "ticker": r["ticker"], "direction": r["direction"], "amount": r["amount"]})
     return results
+
+def was_single_event_notified(conn: sqlite3.Connection, message_id: int) -> bool:
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT 1 FROM single_event_notifications WHERE message_id = ?",
+        (message_id,)
+    )
+    return cursor.fetchone() is not None
+
+def mark_single_event_notified(conn: sqlite3.Connection, message_id: int):
+    with conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO single_event_notifications (message_id, notified_at) VALUES (?, ?)",
+            (message_id, datetime.now(timezone.utc))
+        )
 
 # --- Liquidation Analysis Functions ---
 def _parse_amount(amount_str):
@@ -298,8 +322,12 @@ async def process_message(conn: sqlite3.Connection, message, monitor: Liquidatio
             logging.info(f"Appended event to active session. Total events: {len(monitor.active_period_events)}")
 
         if SINGLE_EVENT_NOTIFICATION_THRESHOLD > 0 and amount >= SINGLE_EVENT_NOTIFICATION_THRESHOLD:
+            if was_single_event_notified(conn, message.id):
+                logging.info(f"Single-event notification already sent for message ID {message.id}. Skipping.")
+                return
             single_event = {"timestamp": now, "ticker": ticker, "direction": direction, "amount": amount}
             await monitor._send_single_event_notification(single_event)
+            mark_single_event_notified(conn, message.id)
         
     except Exception as e:
         logging.error(f"Error processing message (ID: {message.id}): {e}", exc_info=True)
@@ -322,7 +350,15 @@ async def main():
     db_conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     init_db(db_conn)
     
-    client = TelegramClient(SESSION_NAME, int(API_ID), API_HASH)
+    client = TelegramClient(
+        SESSION_NAME,
+        int(API_ID),
+        API_HASH,
+        connection_retries=10,
+        retry_delay=5,
+        auto_reconnect=True,
+        flood_sleep_threshold=30,
+    )
     monitor = LiquidationMonitor()
 
     @client.on(events.NewMessage(chats=CHANNEL_USERNAME))
@@ -331,27 +367,52 @@ async def main():
         await process_message(db_conn, event.message, monitor)
 
     try:
-        async with client:
-            logging.info("Client starting...")
-            
-            channel_entity = await client.get_entity(CHANNEL_USERNAME)
-            logging.info(f"Fetching last {MESSAGE_HISTORY_LIMIT} messages...")
+        reconnect_delay = RECONNECT_BASE_DELAY_SECONDS
+        while True:
+            monitor_task = None
             try:
-                history = await client.get_messages(channel_entity, limit=MESSAGE_HISTORY_LIMIT)
-                for message in reversed(history):
-                    if message and message.text:
-                        await process_message(db_conn, message, monitor)
-            except Exception as e:
-                logging.error(f"Error fetching historical messages: {e}")
-            
-            logging.info("Initial state built. Starting monitoring loop...")
-            monitor_task = asyncio.create_task(monitor_loop(monitor, db_conn))
+                async with client:
+                    logging.info("Client starting...")
 
-            await client.run_until_disconnected()
+                    if not await client.is_user_authorized():
+                        logging.error("Telethon session is not authorized. Please re-login.")
+                        return
+
+                    channel_entity = await client.get_entity(CHANNEL_USERNAME)
+                    logging.info(f"Fetching last {MESSAGE_HISTORY_LIMIT} messages...")
+                    try:
+                        history = await client.get_messages(channel_entity, limit=MESSAGE_HISTORY_LIMIT)
+                        for message in reversed(history):
+                            if message and message.text:
+                                await process_message(db_conn, message, monitor)
+                    except Exception as e:
+                        logging.error(f"Error fetching historical messages: {e}")
+
+                    logging.info("Initial state built. Starting monitoring loop...")
+                    monitor_task = asyncio.create_task(monitor_loop(monitor, db_conn))
+
+                    await client.run_until_disconnected()
+                    logging.warning("Client disconnected. Reconnecting...")
+                    reconnect_delay = RECONNECT_BASE_DELAY_SECONDS
+            except AuthKeyUnregisteredError:
+                logging.error("Auth key unregistered. Session is invalid; please re-login.")
+                break
+            except SessionPasswordNeededError:
+                logging.error("2FA password required. Please re-login with password.")
+                break
+            except (asyncio.TimeoutError, OSError, RPCError) as e:
+                logging.error(f"Transient client error: {e}. Retrying in {reconnect_delay}s.")
+                await asyncio.sleep(reconnect_delay)
+                reconnect_delay = min(reconnect_delay * 2, RECONNECT_MAX_DELAY_SECONDS)
+            except Exception as e:
+                logging.error(f"Unexpected client error: {e}", exc_info=True)
+                await asyncio.sleep(reconnect_delay)
+                reconnect_delay = min(reconnect_delay * 2, RECONNECT_MAX_DELAY_SECONDS)
+            finally:
+                if monitor_task and not monitor_task.done():
+                    monitor_task.cancel()
     finally:
         # Ensure tasks are cancelled and connections closed
-        if 'monitor_task' in locals() and not monitor_task.done():
-            monitor_task.cancel()
         db_conn.close()
         logging.info("Database connection closed.")
 
@@ -362,3 +423,4 @@ if __name__ == "__main__":
         logging.info("Shutting down gracefully.")
     except Exception as e:
         logging.error(f"An unexpected error occurred in main execution: {e}", exc_info=True)
+
