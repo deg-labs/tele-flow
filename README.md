@@ -1,3 +1,23 @@
+<!-- START doctoc generated TOC please keep comment here to allow auto update -->
+<!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
+**Table of Contents**  *generated with [DocToc](https://github.com/thlorenz/doctoc)*
+
+- [Telegram清算流速分析Bot](#telegram%E6%B8%85%E7%AE%97%E6%B5%81%E9%80%9F%E5%88%86%E6%9E%90bot)
+  - [主な機能](#%E4%B8%BB%E3%81%AA%E6%A9%9F%E8%83%BD)
+  - [前提条件](#%E5%89%8D%E6%8F%90%E6%9D%A1%E4%BB%B6)
+  - [セットアップ手順](#%E3%82%BB%E3%83%83%E3%83%88%E3%82%A2%E3%83%83%E3%83%97%E6%89%8B%E9%A0%86)
+    - [1. API IDとAPI Hashの取得](#1-api-id%E3%81%A8api-hash%E3%81%AE%E5%8F%96%E5%BE%97)
+    - [2. Discord Webhook URLの取得](#2-discord-webhook-url%E3%81%AE%E5%8F%96%E5%BE%97)
+    - [3. 環境変数の設定](#3-%E7%92%B0%E5%A2%83%E5%A4%89%E6%95%B0%E3%81%AE%E8%A8%AD%E5%AE%9A)
+    - [4. Dockerイメージのビルド](#4-docker%E3%82%A4%E3%83%A1%E3%83%BC%E3%82%B8%E3%81%AE%E3%83%93%E3%83%AB%E3%83%89)
+    - [5. 初回実行とTelegram認証](#5-%E5%88%9D%E5%9B%9E%E5%AE%9F%E8%A1%8C%E3%81%A8telegram%E8%AA%8D%E8%A8%BC)
+    - [6. Botの起動（2回目以降）](#6-bot%E3%81%AE%E8%B5%B7%E5%8B%952%E5%9B%9E%E7%9B%AE%E4%BB%A5%E9%99%8D)
+    - [生成されるファイル](#%E7%94%9F%E6%88%90%E3%81%95%E3%82%8C%E3%82%8B%E3%83%95%E3%82%A1%E3%82%A4%E3%83%AB)
+    - [8. 動作ログの確認](#8-%E5%8B%95%E4%BD%9C%E3%83%AD%E3%82%B0%E3%81%AE%E7%A2%BA%E8%AA%8D)
+    - [9. Botの停止](#9-bot%E3%81%AE%E5%81%9C%E6%AD%A2)
+
+<!-- END doctoc generated TOC please keep comment here to allow auto update -->
+
 # Telegram清算流速分析Bot
 
 このBotは、Telegramチャンネルの清算メッセージをリアルタイムで監視し、Discordに要約された通知を送信します。  
