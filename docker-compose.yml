@@ -15,4 +15,9 @@ services:
     stdin_open: true
     tty: true
     restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
 
