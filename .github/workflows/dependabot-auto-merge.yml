@@ -1,0 +1,16 @@
+name: Dependabot auto-merge
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  call:
+    uses: deg-labs/github-workflows/.github/workflows/dependabot-auto-merge.yml@main
