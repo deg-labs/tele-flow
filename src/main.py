@@ -48,6 +48,13 @@ try:
     )
     RECONNECT_BASE_DELAY_SECONDS = int(os.getenv("RECONNECT_BASE_DELAY_SECONDS", "5"))
     RECONNECT_MAX_DELAY_SECONDS = int(os.getenv("RECONNECT_MAX_DELAY_SECONDS", "300"))
+    DISCORD_KEEP_MESSAGES = int(os.getenv("DISCORD_KEEP_MESSAGES", "50"))
+    DISCORD_CLEANUP_INTERVAL_HOURS = int(
+        os.getenv("DISCORD_CLEANUP_INTERVAL_HOURS", "24")
+    )
+    DISCORD_DELETE_INTERVAL_SECONDS = float(
+        os.getenv("DISCORD_DELETE_INTERVAL_SECONDS", "0.5")
+    )
 except (ValueError, TypeError) as e:
     logger.error(f"Invalid configuration value: {e}. Please check your .env file.")
     sys.exit(1)
@@ -81,6 +88,18 @@ def init_db(conn: sqlite3.Connection):
             CREATE TABLE IF NOT EXISTS single_event_notifications (
                 message_id INTEGER PRIMARY KEY,
                 notified_at TIMESTAMP NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS discord_messages (
+                message_id TEXT PRIMARY KEY,
+                posted_at TIMESTAMP NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             )
         """)
     logger.info("Database initialized successfully with WAL mode.")
@@ -157,6 +176,139 @@ def mark_single_event_notified(conn: sqlite3.Connection, message_id: int):
         )
 
 
+META_DISCORD_CLEANUP_KEY = "last_discord_cleanup"
+
+
+def add_discord_message(conn: sqlite3.Connection, message_id):
+    """投稿したDiscordメッセージのIDを保持件数管理用に記録する"""
+    with conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO discord_messages (message_id, posted_at) VALUES (?, ?)",
+            (str(message_id), datetime.now(timezone.utc).isoformat()),
+        )
+
+
+def get_stale_discord_message_ids(conn: sqlite3.Connection, keep: int):
+    """保持件数を超えた古いDiscordメッセージIDを新しい順から除外して返す"""
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT message_id FROM discord_messages
+        ORDER BY posted_at DESC, rowid DESC
+        LIMIT -1 OFFSET ?
+        """,
+        (max(keep, 0),),
+    )
+    return [row[0] for row in cursor.fetchall()]
+
+
+def remove_discord_message_row(conn: sqlite3.Connection, message_id):
+    with conn:
+        conn.execute("DELETE FROM discord_messages WHERE message_id = ?", (message_id,))
+
+
+def get_meta(conn: sqlite3.Connection, key: str):
+    cursor = conn.cursor()
+    cursor.execute("SELECT value FROM meta WHERE key = ?", (key,))
+    result = cursor.fetchone()
+    return result[0] if result else None
+
+
+def set_meta(conn: sqlite3.Connection, key: str, value: str):
+    with conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+            (key, value),
+        )
+
+
+# --- Discord Webhook Helpers ---
+def _discord_post_url():
+    """wait=true を付けた投稿用URL (レスポンスからメッセージIDを取得するために必要)"""
+    if not DISCORD_WEBHOOK_URL:
+        return None
+    base, sep, query = DISCORD_WEBHOOK_URL.partition("?")
+    return f"{base}?{query}&wait=true" if sep else f"{base}?wait=true"
+
+
+def _discord_delete_url(message_id):
+    """webhookが投稿したメッセージを削除するURL"""
+    base, sep, query = DISCORD_WEBHOOK_URL.partition("?")
+    url = f"{base}/messages/{message_id}"
+    return f"{url}?{query}" if sep else url
+
+
+async def delete_discord_message(session: aiohttp.ClientSession, message_id) -> bool:
+    """webhook経由で古いDiscordメッセージを削除する。成功時True"""
+    for _ in range(3):
+        try:
+            async with session.delete(_discord_delete_url(message_id)) as response:
+                if response.status == 429:
+                    data = await response.json(content_type=None)
+                    retry_after = (
+                        float(data.get("retry_after", 1))
+                        if isinstance(data, dict)
+                        else 1.0
+                    )
+                    logger.warning(
+                        f"Rate limited while deleting message {message_id}, waiting {retry_after}s"
+                    )
+                    await asyncio.sleep(retry_after)
+                    continue
+                if response.status == 404:
+                    return True
+                response.raise_for_status()
+                return True
+        except aiohttp.ClientError as e:
+            logger.warning(f"Failed to delete Discord message {message_id}: {e}")
+            await asyncio.sleep(1)
+    return False
+
+
+async def cleanup_discord_messages_once(conn: sqlite3.Connection):
+    """保持件数を超えた古いDiscordメッセージをwebhook経由で削除する (インターバル制御付き)"""
+    if not DISCORD_WEBHOOK_URL:
+        return
+    last_cleanup = get_meta(conn, META_DISCORD_CLEANUP_KEY)
+    if last_cleanup:
+        try:
+            elapsed_hours = (
+                datetime.now(timezone.utc) - datetime.fromisoformat(last_cleanup)
+            ).total_seconds() / 3600
+            if elapsed_hours < DISCORD_CLEANUP_INTERVAL_HOURS:
+                return
+        except ValueError:
+            pass
+
+    stale_ids = get_stale_discord_message_ids(conn, DISCORD_KEEP_MESSAGES)
+    if not stale_ids:
+        set_meta(conn, META_DISCORD_CLEANUP_KEY, datetime.now(timezone.utc).isoformat())
+        return
+
+    logger.info(
+        f"Deleting {len(stale_ids)} old Discord messages (keep={DISCORD_KEEP_MESSAGES})"
+    )
+    deleted = 0
+    async with aiohttp.ClientSession() as session:
+        for message_id in stale_ids:
+            if await delete_discord_message(session, message_id):
+                deleted += 1
+                remove_discord_message_row(conn, message_id)
+            await asyncio.sleep(DISCORD_DELETE_INTERVAL_SECONDS)
+    logger.info(f"Deleted {deleted}/{len(stale_ids)} old Discord messages")
+    set_meta(conn, META_DISCORD_CLEANUP_KEY, datetime.now(timezone.utc).isoformat())
+
+
+async def cleanup_discord_messages_loop(conn: sqlite3.Connection):
+    """古いDiscordメッセージの定期削除ループ"""
+    while True:
+        try:
+            await cleanup_discord_messages_once(conn)
+        except Exception:
+            logger.exception("Error in Discord message cleanup loop")
+        await asyncio.sleep(3600)
+
+
 # --- Liquidation Analysis Functions ---
 def _parse_amount(amount_str):
     if not amount_str:
@@ -229,7 +381,8 @@ def calculate_acceleration(current_speed, prev_speed):
 
 # --- Bot State Manager ---
 class LiquidationMonitor:
-    def __init__(self):
+    def __init__(self, conn: sqlite3.Connection):
+        self.conn = conn
         self.state = "IDLE"
         self.active_since = None
         self.last_summary_sent = None
@@ -239,7 +392,7 @@ class LiquidationMonitor:
         self.active_period_events = []
 
     async def _send_single_event_notification(self, event):
-        if not DISCORD_WEBHOOK_URL:
+        if not DISCORD_WEBHOOK_URL or not _discord_post_url():
             return
         direction_emoji = "🟢" if event["direction"] == "Short" else "🔴"
         title = f"{direction_emoji} Large {event['direction']} Liquidation"
@@ -259,17 +412,21 @@ class LiquidationMonitor:
         async with aiohttp.ClientSession() as session:
             try:
                 async with session.post(
-                    DISCORD_WEBHOOK_URL, json={"embeds": [embed]}
+                    _discord_post_url(), json={"embeds": [embed]}
                 ) as response:
                     response.raise_for_status()
                     logger.info(
                         "Successfully sent single-event notification to Discord."
                     )
+                    data = await response.json(content_type=None)
+                    message_id = data.get("id") if isinstance(data, dict) else None
+                    if message_id:
+                        add_discord_message(self.conn, str(message_id))
             except aiohttp.ClientError:
                 logger.error("Failed to send Discord single-event notification")
 
     async def _send_summary_notification(self, metrics, acceleration, prev_speed):
-        if not DISCORD_WEBHOOK_URL:
+        if not DISCORD_WEBHOOK_URL or not _discord_post_url():
             return
         title = "⚠ High Liquidation Activity ⚠"
         if (
@@ -324,11 +481,15 @@ class LiquidationMonitor:
         async with aiohttp.ClientSession() as session:
             try:
                 async with session.post(
-                    DISCORD_WEBHOOK_URL, json={"embeds": [embed]}
+                    _discord_post_url(), json={"embeds": [embed]}
                 ) as response:
                     response.raise_for_status()
                     logger.info("Successfully sent summary notification to Discord.")
                     self.last_summary_sent = datetime.now(timezone.utc)
+                    data = await response.json(content_type=None)
+                    message_id = data.get("id") if isinstance(data, dict) else None
+                    if message_id:
+                        add_discord_message(self.conn, str(message_id))
             except aiohttp.ClientError:
                 logger.error("Failed to send Discord summary notification")
 
@@ -486,7 +647,7 @@ async def main():
         auto_reconnect=True,
         flood_sleep_threshold=30,
     )
-    monitor = LiquidationMonitor()
+    monitor = LiquidationMonitor(db_conn)
 
     @client.on(events.NewMessage(chats=CHANNEL_USERNAME))
     async def new_message_handler(event):
@@ -497,6 +658,7 @@ async def main():
         reconnect_delay = RECONNECT_BASE_DELAY_SECONDS
         while True:
             monitor_task = None
+            cleanup_task = None
             try:
                 async with client:
                     logger.info("Client starting...")
@@ -521,6 +683,9 @@ async def main():
 
                     logger.info("Initial state built. Starting monitoring loop...")
                     monitor_task = asyncio.create_task(monitor_loop(monitor, db_conn))
+                    cleanup_task = asyncio.create_task(
+                        cleanup_discord_messages_loop(db_conn)
+                    )
 
                     await client.run_until_disconnected()
                     logger.warning("Client disconnected. Reconnecting...")
@@ -546,6 +711,8 @@ async def main():
             finally:
                 if monitor_task and not monitor_task.done():
                     monitor_task.cancel()
+                if cleanup_task and not cleanup_task.done():
+                    cleanup_task.cancel()
     finally:
         # Ensure tasks are cancelled and connections closed
         db_conn.close()
