@@ -1,48 +1,61 @@
+import asyncio
+import logging
 import os
 import re
-import asyncio
-import aiohttp # REFACTOR: Use aiohttp for async requests
-import logging
 import sqlite3
-from datetime import datetime, timedelta, timezone
+import sys
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 
+import aiohttp  # REFACTOR: Use aiohttp for async requests
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
-from telethon.errors import AuthKeyUnregisteredError, RPCError, SessionPasswordNeededError
+from telethon.errors import (
+    AuthKeyUnregisteredError,
+    RPCError,
+    SessionPasswordNeededError,
+)
 
 # --- Setup Logging ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 # --- Load Environment Variables & Config ---
 load_dotenv()
-API_ID = os.getenv('API_ID')
-API_HASH = os.getenv('API_HASH')
-SESSION_NAME = os.getenv('SESSION_NAME', 'my_session')
-CHANNEL_USERNAME = os.getenv('CHANNEL_USERNAME')
-DISCORD_WEBHOOK_URL = os.getenv('DISCORD_WEBHOOK_URL')
+API_ID = os.getenv("API_ID")
+API_HASH = os.getenv("API_HASH")
+SESSION_NAME = os.getenv("SESSION_NAME", "my_session")
+CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME")
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 JST_TZ = timezone(timedelta(hours=9))
 
 try:
-    MESSAGE_HISTORY_LIMIT = int(os.getenv('MESSAGE_HISTORY_LIMIT', 50))
-    BASE_THRESHOLD_USD_PER_SEC = float(os.getenv('BASE_THRESHOLD_USD_PER_SEC', 20000))
-    ANALYSIS_WINDOW_SECONDS = int(os.getenv('ANALYSIS_WINDOW_SECONDS', 300))
-    MONITORING_INTERVAL_SECONDS = int(os.getenv('MONITORING_INTERVAL_SECONDS', 10))
-    ACCELERATION_THRESHOLD = float(os.getenv('ACCELERATION_THRESHOLD', 3.0))
-    DOMINANCE_THRESHOLD = float(os.getenv('DOMINANCE_THRESHOLD', 0.75))
-    BIAS_THRESHOLD = float(os.getenv('BIAS_THRESHOLD', 0.85))
-    SUMMARY_COOLDOWN_SECONDS = int(os.getenv('SUMMARY_COOLDOWN_SECONDS', 60))
-    ACTIVE_IDLE_TRANSITION_GRACE_PERIOD_SECONDS = int(os.getenv('ACTIVE_IDLE_TRANSITION_GRACE_PERIOD_SECONDS', 30))
-    SINGLE_EVENT_NOTIFICATION_THRESHOLD = float(os.getenv('SINGLE_EVENT_NOTIFICATION_THRESHOLD', 0))
-    RECONNECT_BASE_DELAY_SECONDS = int(os.getenv('RECONNECT_BASE_DELAY_SECONDS', 5))
-    RECONNECT_MAX_DELAY_SECONDS = int(os.getenv('RECONNECT_MAX_DELAY_SECONDS', 300))
+    MESSAGE_HISTORY_LIMIT = int(os.getenv("MESSAGE_HISTORY_LIMIT", "50"))
+    BASE_THRESHOLD_USD_PER_SEC = float(os.getenv("BASE_THRESHOLD_USD_PER_SEC", "20000"))
+    ANALYSIS_WINDOW_SECONDS = int(os.getenv("ANALYSIS_WINDOW_SECONDS", "300"))
+    MONITORING_INTERVAL_SECONDS = int(os.getenv("MONITORING_INTERVAL_SECONDS", "10"))
+    ACCELERATION_THRESHOLD = float(os.getenv("ACCELERATION_THRESHOLD", "3.0"))
+    DOMINANCE_THRESHOLD = float(os.getenv("DOMINANCE_THRESHOLD", "0.75"))
+    BIAS_THRESHOLD = float(os.getenv("BIAS_THRESHOLD", "0.85"))
+    SUMMARY_COOLDOWN_SECONDS = int(os.getenv("SUMMARY_COOLDOWN_SECONDS", "60"))
+    ACTIVE_IDLE_TRANSITION_GRACE_PERIOD_SECONDS = int(
+        os.getenv("ACTIVE_IDLE_TRANSITION_GRACE_PERIOD_SECONDS", "30")
+    )
+    SINGLE_EVENT_NOTIFICATION_THRESHOLD = float(
+        os.getenv("SINGLE_EVENT_NOTIFICATION_THRESHOLD", "0")
+    )
+    RECONNECT_BASE_DELAY_SECONDS = int(os.getenv("RECONNECT_BASE_DELAY_SECONDS", "5"))
+    RECONNECT_MAX_DELAY_SECONDS = int(os.getenv("RECONNECT_MAX_DELAY_SECONDS", "300"))
 except (ValueError, TypeError) as e:
-    logging.error(f"Invalid configuration value: {e}. Please check your .env file.")
-    exit(1)
+    logger.error(f"Invalid configuration value: {e}. Please check your .env file.")
+    sys.exit(1)
 
 # --- Database Setup ---
 DB_FILE = "bot_data.db"
 LIQUIDATION_HISTORY_LIMIT = 200
+
 
 # REFACTOR: Use a single connection passed around, enable WAL mode
 def init_db(conn: sqlite3.Connection):
@@ -70,7 +83,8 @@ def init_db(conn: sqlite3.Connection):
                 notified_at TIMESTAMP NOT NULL
             )
         """)
-    logging.info("Database initialized successfully with WAL mode.")
+    logger.info("Database initialized successfully with WAL mode.")
+
 
 # --- DB Helper Functions (modified for persistent connection) ---
 def _to_datetime(ts_val):
@@ -81,12 +95,13 @@ def _to_datetime(ts_val):
             return None
     return ts_val
 
+
 def add_liquidation(conn: sqlite3.Connection, timestamp, ticker, direction, amount):
     """Adds a liquidation event to the DB and trims old records."""
     with conn:
         conn.execute(
             "INSERT INTO liquidations (timestamp, ticker, direction, amount) VALUES (?, ?, ?, ?)",
-            (timestamp, ticker, direction, amount)
+            (timestamp, ticker, direction, amount),
         )
         conn.execute(f"""
             DELETE FROM liquidations
@@ -97,50 +112,61 @@ def add_liquidation(conn: sqlite3.Connection, timestamp, ticker, direction, amou
             )
         """)
 
+
 def get_liquidations_in_timeframe(conn: sqlite3.Connection, start_time, end_time=None):
     """Fetches liquidations from the DB within a given timeframe."""
     if end_time is None:
         end_time = datetime.now(timezone.utc)
-    
+
     cursor = conn.cursor()
     cursor.row_factory = sqlite3.Row
     cursor.execute(
         "SELECT timestamp, ticker, direction, amount FROM liquidations WHERE timestamp BETWEEN ? AND ? ORDER BY timestamp ASC",
-        (start_time, end_time)
+        (start_time, end_time),
     )
     rows = cursor.fetchall()
-    
+
     results = []
     for r in rows:
         ts = _to_datetime(r["timestamp"])
         if ts:
-            results.append({"timestamp": ts, "ticker": r["ticker"], "direction": r["direction"], "amount": r["amount"]})
+            results.append(
+                {
+                    "timestamp": ts,
+                    "ticker": r["ticker"],
+                    "direction": r["direction"],
+                    "amount": r["amount"],
+                }
+            )
     return results
+
 
 def was_single_event_notified(conn: sqlite3.Connection, message_id: int) -> bool:
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT 1 FROM single_event_notifications WHERE message_id = ?",
-        (message_id,)
+        "SELECT 1 FROM single_event_notifications WHERE message_id = ?", (message_id,)
     )
     return cursor.fetchone() is not None
+
 
 def mark_single_event_notified(conn: sqlite3.Connection, message_id: int):
     with conn:
         conn.execute(
             "INSERT OR IGNORE INTO single_event_notifications (message_id, notified_at) VALUES (?, ?)",
-            (message_id, datetime.now(timezone.utc))
+            (message_id, datetime.now(timezone.utc)),
         )
+
 
 # --- Liquidation Analysis Functions ---
 def _parse_amount(amount_str):
-    if not amount_str: return 0.0
-    amount_str = amount_str.replace('$', '').replace(',', '')
+    if not amount_str:
+        return 0.0
+    amount_str = amount_str.replace("$", "").replace(",", "")
     multiplier = 1.0
-    if amount_str.endswith('k'):
+    if amount_str.endswith("k"):
         multiplier = 1_000.0
         amount_str = amount_str[:-1]
-    elif amount_str.endswith('M'):
+    elif amount_str.endswith("M"):
         multiplier = 1_000_000.0
         amount_str = amount_str[:-1]
     try:
@@ -148,25 +174,40 @@ def _parse_amount(amount_str):
     except ValueError:
         return 0.0
 
+
 def parse_liquidation_message(message_text):
-    if not message_text: return None, None, None
-    match = re.search(r"#(?:\w+:)?(\w+)\s+(Long|Short)\s+Liquidation:\s*(\$[\d,]+\.?\d*[kM]?)", message_text, re.IGNORECASE)
+    if not message_text:
+        return None, None, None
+    match = re.search(
+        r"#(?:\w+:)?(\w+)\s+(Long|Short)\s+Liquidation:\s*(\$[\d,]+\.?\d*[kM]?)",
+        message_text,
+        re.IGNORECASE,
+    )
     if match:
         ticker, direction, amount_str = match.groups()
         return ticker.upper(), direction.capitalize(), _parse_amount(amount_str)
     return None, None, None
 
+
 def calculate_liquidation_metrics(events, window_seconds):
-    total_amount = sum(e['amount'] for e in events)
+    total_amount = sum(e["amount"] for e in events)
     total_count = len(events)
     speed_usd_per_sec = total_amount / window_seconds if window_seconds > 0 else 0
     ticker_amounts = defaultdict(float)
     for event in events:
-        ticker_amounts[event['ticker']] += event['amount']
-    dominance_info = {t: a / total_amount for t, a in ticker_amounts.items()} if total_amount > 0 else {}
-    long_amount = sum(e['amount'] for e in events if e['direction'] == 'Long')
-    total_directional_amount = sum(e['amount'] for e in events if e['direction'] in ['Long', 'Short'])
-    long_bias = long_amount / total_directional_amount if total_directional_amount > 0 else 0
+        ticker_amounts[event["ticker"]] += event["amount"]
+    dominance_info = (
+        {t: a / total_amount for t, a in ticker_amounts.items()}
+        if total_amount > 0
+        else {}
+    )
+    long_amount = sum(e["amount"] for e in events if e["direction"] == "Long")
+    total_directional_amount = sum(
+        e["amount"] for e in events if e["direction"] in ["Long", "Short"]
+    )
+    long_bias = (
+        long_amount / total_directional_amount if total_directional_amount > 0 else 0
+    )
     return {
         "speed_usd_per_sec": speed_usd_per_sec,
         "total_amount": total_amount,
@@ -177,12 +218,14 @@ def calculate_liquidation_metrics(events, window_seconds):
         "short_bias": 1.0 - long_bias if total_directional_amount > 0 else 0,
     }
 
+
 def calculate_acceleration(current_speed, prev_speed):
-    if prev_speed > 500: # Avoid extreme acceleration on low baseline
+    if prev_speed > 500:  # Avoid extreme acceleration on low baseline
         return current_speed / prev_speed
     elif current_speed > 0:
-        return ACCELERATION_THRESHOLD # Cap acceleration for display
+        return ACCELERATION_THRESHOLD  # Cap acceleration for display
     return 1.0
+
 
 # --- Bot State Manager ---
 class LiquidationMonitor:
@@ -192,35 +235,54 @@ class LiquidationMonitor:
         self.last_summary_sent = None
         self.last_known_speed = 0.0
         self.prev_known_speed = 0.0
-        self.last_above_threshold_time = None # REFACTOR: Renamed for clarity
+        self.last_above_threshold_time = None  # REFACTOR: Renamed for clarity
         self.active_period_events = []
 
     async def _send_single_event_notification(self, event):
-        if not DISCORD_WEBHOOK_URL: return
+        if not DISCORD_WEBHOOK_URL:
+            return
         direction_emoji = "🟢" if event["direction"] == "Short" else "🔴"
         title = f"{direction_emoji} Large {event['direction']} Liquidation"
-        jst_time = event["timestamp"].astimezone(JST_TZ).strftime("%Y-%m-%d %H:%M:%S JST")
+        jst_time = (
+            event["timestamp"].astimezone(JST_TZ).strftime("%Y-%m-%d %H:%M:%S JST")
+        )
         description_lines = [
             f"**Ticker:** `{event['ticker']}`",
             f"**Amount:** `${event['amount']:,.2f}`",
             f"**Time:** `{jst_time}`",
         ]
-        embed = {"title": title, "description": "\n".join(description_lines), "color": 5763719 if event["direction"] == "Short" else 15548997}
+        embed = {
+            "title": title,
+            "description": "\n".join(description_lines),
+            "color": 5763719 if event["direction"] == "Short" else 15548997,
+        }
         async with aiohttp.ClientSession() as session:
             try:
-                async with session.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed]}) as response:
+                async with session.post(
+                    DISCORD_WEBHOOK_URL, json={"embeds": [embed]}
+                ) as response:
                     response.raise_for_status()
-                    logging.info("Successfully sent single-event notification to Discord.")
-            except aiohttp.ClientError as e:
-                logging.error(f"Failed to send Discord single-event notification: {e}")
+                    logger.info(
+                        "Successfully sent single-event notification to Discord."
+                    )
+            except aiohttp.ClientError:
+                logger.error("Failed to send Discord single-event notification")
 
     async def _send_summary_notification(self, metrics, acceleration, prev_speed):
-        if not DISCORD_WEBHOOK_URL: return
+        if not DISCORD_WEBHOOK_URL:
+            return
         title = "⚠ High Liquidation Activity ⚠"
-        if acceleration >= ACCELERATION_THRESHOLD and metrics["speed_usd_per_sec"] >= BASE_THRESHOLD_USD_PER_SEC:
+        if (
+            acceleration >= ACCELERATION_THRESHOLD
+            and metrics["speed_usd_per_sec"] >= BASE_THRESHOLD_USD_PER_SEC
+        ):
             title = "🚨 CRITICAL LIQUIDATION SPIKE 🚨"
 
-        now_jst = datetime.now(timezone.utc).astimezone(JST_TZ).strftime("%Y-%m-%d %H:%M:%S JST")
+        now_jst = (
+            datetime.now(timezone.utc)
+            .astimezone(JST_TZ)
+            .strftime("%Y-%m-%d %H:%M:%S JST")
+        )
         description_lines = [
             f"**Speed:** `{metrics['speed_usd_per_sec']:.2f} USD/sec`",
             f"**Acceleration:** `x{acceleration:.2f}` (Prev Window: {prev_speed:.2f} USD/sec)",
@@ -228,40 +290,61 @@ class LiquidationMonitor:
             f"**Total Amount:** `${metrics['total_amount']:,.2f}`",
             f"**Time:** `{now_jst}`",
         ]
-        if metrics['total_count'] > 0:
-            description_lines.append(f"**Avg per event:** `${metrics['avg_event_amount']:,.2f}`")
+        if metrics["total_count"] > 0:
+            description_lines.append(
+                f"**Avg per event:** `${metrics['avg_event_amount']:,.2f}`"
+            )
 
         if metrics["dominance_info"]:
-            sorted_dominance = sorted(metrics["dominance_info"].items(), key=lambda item: item[1], reverse=True)[:3]
+            sorted_dominance = sorted(
+                metrics["dominance_info"].items(),
+                key=lambda item: item[1],
+                reverse=True,
+            )[:3]
             dominance_str = ", ".join([f"{t}: {r:.1%}" for t, r in sorted_dominance])
-            if dominance_str: description_lines.append(f"**Dominance:** {dominance_str}")
-        
-        if metrics["long_bias"] >= BIAS_THRESHOLD:
-            description_lines.append(f"🔴 **Long Flush:** `{metrics['long_bias']:.1%}` Longs")
-        elif metrics["short_bias"] >= BIAS_THRESHOLD:
-            description_lines.append(f"🟢 **Short Squeeze:** `{metrics['short_bias']:.1%}` Shorts")
+            if dominance_str:
+                description_lines.append(f"**Dominance:** {dominance_str}")
 
-        embed = {"title": title, "description": "\n".join(description_lines), "color": 15844367 if "CRITICAL" in title else 16776960}
-        
+        if metrics["long_bias"] >= BIAS_THRESHOLD:
+            description_lines.append(
+                f"🔴 **Long Flush:** `{metrics['long_bias']:.1%}` Longs"
+            )
+        elif metrics["short_bias"] >= BIAS_THRESHOLD:
+            description_lines.append(
+                f"🟢 **Short Squeeze:** `{metrics['short_bias']:.1%}` Shorts"
+            )
+
+        embed = {
+            "title": title,
+            "description": "\n".join(description_lines),
+            "color": 15844367 if "CRITICAL" in title else 16776960,
+        }
+
         # REFACTOR: Use aiohttp for non-blocking post
         async with aiohttp.ClientSession() as session:
             try:
-                async with session.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed]}) as response:
+                async with session.post(
+                    DISCORD_WEBHOOK_URL, json={"embeds": [embed]}
+                ) as response:
                     response.raise_for_status()
-                    logging.info("Successfully sent summary notification to Discord.")
+                    logger.info("Successfully sent summary notification to Discord.")
                     self.last_summary_sent = datetime.now(timezone.utc)
-            except aiohttp.ClientError as e:
-                logging.error(f"Failed to send Discord summary notification: {e}")
+            except aiohttp.ClientError:
+                logger.error("Failed to send Discord summary notification")
 
     async def check_and_transition(self, conn: sqlite3.Connection):
         now = datetime.now(timezone.utc)
-        
+
         # REFACTOR: Speed calculation logic based on state
         if self.state == "ACTIVE":
             # Use in-memory events for ongoing speed calculation
             events = self.active_period_events
-            window_duration = (now - self.active_since).total_seconds() if self.active_since else ANALYSIS_WINDOW_SECONDS
-        else: # IDLE state
+            window_duration = (
+                (now - self.active_since).total_seconds()
+                if self.active_since
+                else ANALYSIS_WINDOW_SECONDS
+            )
+        else:  # IDLE state
             # Use DB query for initial detection
             time_window_start = now - timedelta(seconds=ANALYSIS_WINDOW_SECONDS)
             events = get_liquidations_in_timeframe(conn, time_window_start, now)
@@ -270,86 +353,130 @@ class LiquidationMonitor:
         current_metrics = calculate_liquidation_metrics(events, window_duration)
         current_speed = current_metrics["speed_usd_per_sec"]
 
-        logging.debug(f"State: {self.state}, Speed: {current_speed:.2f}, Events: {len(events)}")
+        logger.debug(
+            f"State: {self.state}, Speed: {current_speed:.2f}, Events: {len(events)}"
+        )
 
         if self.state == "IDLE":
             if current_speed >= BASE_THRESHOLD_USD_PER_SEC:
-                if self.last_summary_sent and (now - self.last_summary_sent).total_seconds() < SUMMARY_COOLDOWN_SECONDS:
+                if (
+                    self.last_summary_sent
+                    and (now - self.last_summary_sent).total_seconds()
+                    < SUMMARY_COOLDOWN_SECONDS
+                ):
                     return
 
                 self.state = "ACTIVE"
                 self.active_since = now
                 self.active_period_events = list(events)
                 self.prev_known_speed = self.last_known_speed
-                self.last_above_threshold_time = now # Start grace period timer
-                logging.info(f"Transitioned to ACTIVE with {len(events)} events. Prev speed: {self.prev_known_speed:.2f}")
+                self.last_above_threshold_time = now  # Start grace period timer
+                logger.info(
+                    f"Transitioned to ACTIVE with {len(events)} events. Prev speed: {self.prev_known_speed:.2f}"
+                )
             self.last_known_speed = current_speed
 
         elif self.state == "ACTIVE":
             if current_speed < BASE_THRESHOLD_USD_PER_SEC:
-                grace_period_elapsed = (now - self.last_above_threshold_time).total_seconds()
+                grace_period_elapsed = (
+                    now - self.last_above_threshold_time
+                ).total_seconds()
                 if grace_period_elapsed >= ACTIVE_IDLE_TRANSITION_GRACE_PERIOD_SECONDS:
-                    logging.info("Speed dropped below threshold for grace period. Preparing SUMMARY.")
-                    summary_metrics = calculate_liquidation_metrics(self.active_period_events, (now - self.active_since).total_seconds())
-                    acceleration = calculate_acceleration(summary_metrics['speed_usd_per_sec'], self.prev_known_speed)
-                    
-                    await self._send_summary_notification(summary_metrics, acceleration, self.prev_known_speed)
+                    logger.info(
+                        "Speed dropped below threshold for grace period. Preparing SUMMARY."
+                    )
+                    summary_metrics = calculate_liquidation_metrics(
+                        self.active_period_events,
+                        (now - self.active_since).total_seconds(),
+                    )
+                    acceleration = calculate_acceleration(
+                        summary_metrics["speed_usd_per_sec"], self.prev_known_speed
+                    )
+
+                    await self._send_summary_notification(
+                        summary_metrics, acceleration, self.prev_known_speed
+                    )
 
                     self.state = "IDLE"
                     self.active_since = None
                     self.active_period_events = []
                     self.last_known_speed = 0.0
                     self.prev_known_speed = 0.0
-                    logging.info("Transitioned to IDLE after sending SUMMARY.")
+                    logger.info("Transitioned to IDLE after sending SUMMARY.")
             else:
-                self.last_above_threshold_time = now # Reset grace period timer
+                self.last_above_threshold_time = now  # Reset grace period timer
             self.last_known_speed = current_speed
 
+
 # REFACTOR: Make async and accept connection
-async def process_message(conn: sqlite3.Connection, message, monitor: LiquidationMonitor):
+async def process_message(
+    conn: sqlite3.Connection, message, monitor: LiquidationMonitor
+):
     try:
         ticker, direction, amount = parse_liquidation_message(message.text)
-        if not all([ticker, direction, amount]): return
+        if not all([ticker, direction, amount]):
+            return
 
         now = message.date.astimezone(timezone.utc)
-        logging.info(f"Detected liquidation: {ticker}-{direction}, Amount: {amount:.2f}")
-        
-        add_liquidation(conn, now, ticker, direction, amount)
-        
-        if monitor.state == "ACTIVE":
-            new_event = {"timestamp": now, "ticker": ticker, "direction": direction, "amount": amount}
-            monitor.active_period_events.append(new_event)
-            logging.info(f"Appended event to active session. Total events: {len(monitor.active_period_events)}")
+        logger.info(f"Detected liquidation: {ticker}-{direction}, Amount: {amount:.2f}")
 
-        if SINGLE_EVENT_NOTIFICATION_THRESHOLD > 0 and amount >= SINGLE_EVENT_NOTIFICATION_THRESHOLD:
+        add_liquidation(conn, now, ticker, direction, amount)
+
+        if monitor.state == "ACTIVE":
+            new_event = {
+                "timestamp": now,
+                "ticker": ticker,
+                "direction": direction,
+                "amount": amount,
+            }
+            monitor.active_period_events.append(new_event)
+            logger.info(
+                f"Appended event to active session. Total events: {len(monitor.active_period_events)}"
+            )
+
+        if (
+            SINGLE_EVENT_NOTIFICATION_THRESHOLD > 0
+            and amount >= SINGLE_EVENT_NOTIFICATION_THRESHOLD
+        ):
             if was_single_event_notified(conn, message.id):
-                logging.info(f"Single-event notification already sent for message ID {message.id}. Skipping.")
+                logger.info(
+                    f"Single-event notification already sent for message ID {message.id}. Skipping."
+                )
                 return
-            single_event = {"timestamp": now, "ticker": ticker, "direction": direction, "amount": amount}
+            single_event = {
+                "timestamp": now,
+                "ticker": ticker,
+                "direction": direction,
+                "amount": amount,
+            }
             await monitor._send_single_event_notification(single_event)
             mark_single_event_notified(conn, message.id)
-        
-    except Exception as e:
-        logging.error(f"Error processing message (ID: {message.id}): {e}", exc_info=True)
+
+    except Exception:
+        logger.exception(f"Error processing message (ID: {message.id})")
+
 
 async def monitor_loop(monitor: LiquidationMonitor, conn: sqlite3.Connection):
     while True:
         try:
             await monitor.check_and_transition(conn)
             await asyncio.sleep(MONITORING_INTERVAL_SECONDS)
-        except Exception as e:
-            logging.error(f"Error in monitoring loop: {e}", exc_info=True)
-            await asyncio.sleep(MONITORING_INTERVAL_SECONDS * 2) # Longer sleep on error
+        except Exception:
+            logger.exception("Error in monitoring loop")
+            await asyncio.sleep(
+                MONITORING_INTERVAL_SECONDS * 2
+            )  # Longer sleep on error
+
 
 async def main():
     if not all([API_ID, API_HASH, CHANNEL_USERNAME]):
-        logging.error("API_ID, API_HASH, and CHANNEL_USERNAME must be set.")
+        logger.error("API_ID, API_HASH, and CHANNEL_USERNAME must be set.")
         return
 
     # REFACTOR: Persistent DB connection
     db_conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     init_db(db_conn)
-    
+
     client = TelegramClient(
         SESSION_NAME,
         int(API_ID),
@@ -372,40 +499,48 @@ async def main():
             monitor_task = None
             try:
                 async with client:
-                    logging.info("Client starting...")
+                    logger.info("Client starting...")
 
                     if not await client.is_user_authorized():
-                        logging.error("Telethon session is not authorized. Please re-login.")
+                        logger.error(
+                            "Telethon session is not authorized. Please re-login."
+                        )
                         return
 
                     channel_entity = await client.get_entity(CHANNEL_USERNAME)
-                    logging.info(f"Fetching last {MESSAGE_HISTORY_LIMIT} messages...")
+                    logger.info(f"Fetching last {MESSAGE_HISTORY_LIMIT} messages...")
                     try:
-                        history = await client.get_messages(channel_entity, limit=MESSAGE_HISTORY_LIMIT)
+                        history = await client.get_messages(
+                            channel_entity, limit=MESSAGE_HISTORY_LIMIT
+                        )
                         for message in reversed(history):
                             if message and message.text:
                                 await process_message(db_conn, message, monitor)
-                    except Exception as e:
-                        logging.error(f"Error fetching historical messages: {e}")
+                    except Exception:  # noqa: BLE001
+                        logger.error("Error fetching historical messages")
 
-                    logging.info("Initial state built. Starting monitoring loop...")
+                    logger.info("Initial state built. Starting monitoring loop...")
                     monitor_task = asyncio.create_task(monitor_loop(monitor, db_conn))
 
                     await client.run_until_disconnected()
-                    logging.warning("Client disconnected. Reconnecting...")
+                    logger.warning("Client disconnected. Reconnecting...")
                     reconnect_delay = RECONNECT_BASE_DELAY_SECONDS
             except AuthKeyUnregisteredError:
-                logging.error("Auth key unregistered. Session is invalid; please re-login.")
+                logger.error(
+                    "Auth key unregistered. Session is invalid; please re-login."
+                )
                 break
             except SessionPasswordNeededError:
-                logging.error("2FA password required. Please re-login with password.")
+                logger.error("2FA password required. Please re-login with password.")
                 break
             except (asyncio.TimeoutError, OSError, RPCError) as e:
-                logging.error(f"Transient client error: {e}. Retrying in {reconnect_delay}s.")
+                logger.error(
+                    f"Transient client error: {e}. Retrying in {reconnect_delay}s."
+                )
                 await asyncio.sleep(reconnect_delay)
                 reconnect_delay = min(reconnect_delay * 2, RECONNECT_MAX_DELAY_SECONDS)
-            except Exception as e:
-                logging.error(f"Unexpected client error: {e}", exc_info=True)
+            except Exception:
+                logger.exception("Unexpected client error")
                 await asyncio.sleep(reconnect_delay)
                 reconnect_delay = min(reconnect_delay * 2, RECONNECT_MAX_DELAY_SECONDS)
             finally:
@@ -414,13 +549,13 @@ async def main():
     finally:
         # Ensure tasks are cancelled and connections closed
         db_conn.close()
-        logging.info("Database connection closed.")
+        logger.info("Database connection closed.")
+
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        logging.info("Shutting down gracefully.")
-    except Exception as e:
-        logging.error(f"An unexpected error occurred in main execution: {e}", exc_info=True)
-
+        logger.info("Shutting down gracefully.")
+    except Exception:
+        logger.exception("An unexpected error occurred in main execution")
