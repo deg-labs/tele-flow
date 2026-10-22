@@ -9,10 +9,15 @@ permissions:
 
 jobs:
   retention:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        python: ['3.9', '3.14']
+        include:
+          - python: '3.9'
+            os: ubuntu-22.04
+          - python: '3.14'
+            os: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
