@@ -3,3 +3,7 @@
 *.db-wal
 *.db-shm
 .env
+
+# Python test and runtime caches
+__pycache__/
+.pytest_cache/
